@@ -62,6 +62,12 @@ module emu
 	output        HDMI_BLACKOUT,
 	output        HDMI_BOB_DEINT,
 
+	input   [5:0] LFB_FMT,
+	input  [31:0] LFB_BASE,
+	input  [11:0] LFB_WIDTH,
+	input  [11:0] LFB_HEIGHT,
+	input  [13:0] LFB_STRIDE,
+
 `ifdef MISTER_FB
 	// Use framebuffer in DDRAM
 	// FB_FORMAT:
@@ -403,9 +409,12 @@ localparam CONF_STR =
 	"F,BIN;",
 	"D2S1,DSKIMGBKD,Mount FDD A;",
 	"D2S2,DSKIMGBKD,Mount FDD B;",
-	"H3S3,DSKIMGBKD,Mount FDD C;",
-	"H3S4,DSKIMGBKD,Mount FDD D;",
-	"H4S0,HDIHDSIMG,Mount HDD;",
+	"D3S3,DSKIMGBKD,Mount FDD C;",
+	"D3S4,DSKIMGBKD,Mount FDD D;",
+	"D4SC0,HDIHDS,Mount HDD;",
+	"-;",
+	"OIK,Disk controller,Standard,A16M,SMK512,Samara,None;",
+	"OH,FDD write protect,No,Yes;",
 	"-;",
 	"O3,Monochrome,No,Yes;",
 	"ODE,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
@@ -418,9 +427,6 @@ localparam CONF_STR =
 	"O5,Model,BK0011M,BK0010;",
 	"H0O1,CPU Speed,4MHz,8MHz;",
 	"H1O1,CPU Speed,3MHz,6MHz;",
-	"-;",
-	"OIK,Disk controller,Standard,A16M,SMK512,Samara,None;",
-	"OH,FDD write protect,No,Yes;",
 	"-;",
 	"R2,Reset;",
 	// [MiSTer-DB9-Pro BEGIN] - Saturn-first joy_type (canonical bit notation)
