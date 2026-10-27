@@ -266,7 +266,7 @@ assign {DDRAM_CLK, DDRAM_BURSTCNT, DDRAM_ADDR, DDRAM_DIN, DDRAM_BE, DDRAM_RD, DD
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 
 assign LED_USER  = dsk_copy;
-assign LED_DISK  = 0;
+assign LED_DISK  = {1'b0, fdd_motor | hdd_active};
 assign LED_POWER = 0;
 assign BUTTONS   = 0;
 assign VGA_SCALER= 0;
@@ -276,6 +276,17 @@ assign HDMI_BLACKOUT = 0;
 assign HDMI_BOB_DEINT = 0;
 
 wire [1:0] ar = status[14:13];
+
+// Disk controller: standard KNGMD (4 drives), A16M or SMK512 (AltPro, 2 drives),
+// standard KNGMD + Samara HDD board (2 drives), or none
+wire  [2:0] disk_ctrl  = status[20:18];
+wire        std_fdd    = (disk_ctrl == 3'd0);
+wire        a16m       = (disk_ctrl == 3'd1);
+wire        smk512     = (disk_ctrl == 3'd2);
+wire        samara     = (disk_ctrl == 3'd3);
+wire        no_disk    = disk_ctrl[2];
+wire        extension  = a16m | smk512;
+
 video_freak video_freak
 (
 	.*,
@@ -355,16 +366,25 @@ wire        forced_scandoubler;
 wire [127:0] status;
 // [MiSTer-DB9 END]
 
-wire [31:0] sd_lba;
-wire  [2:0] sd_rd;
-wire  [2:0] sd_wr;
-wire  [2:0] sd_ack;
+// image slots: 0 the hard disk, 1-4 the floppy drives A-D (C and D only
+// with the standard controller; Main auto-mounts boot0.vhd..boot3.vhd)
+localparam DRIVES = 4;
+localparam HDD    = 0;
+localparam FDD0   = 1;
+localparam SLOTS  = 5;
+
+wire [31:0] fdd_lba;
+wire [31:0] hdd_lba;
+wire [SLOTS-1:0] sd_rd;
+wire [SLOTS-1:0] sd_wr;
+wire [SLOTS-1:0] sd_ack;
 wire  [7:0] sd_buff_addr;
 wire [15:0] sd_buff_dout;
-wire [15:0] sd_buff_din;
+wire [15:0] fdd_buff_din;
+wire [15:0] hdd_buff_din;
 wire        sd_buff_wr;
 
-wire  [2:0] img_mounted;
+wire [SLOTS-1:0] img_mounted;
 wire        img_readonly;
 wire [63:0] img_size;
 
@@ -381,9 +401,11 @@ localparam CONF_STR =
 {
 	"BK0011M;;",
 	"F,BIN;",
-	"D2S1,DSK,Mount FDD(A);",
-	"D2S2,DSK,Mount FDD(B);",
-	"D2S0,VHD,Mount HDD;",
+	"D2S1,DSKIMGBKD,Mount FDD A;",
+	"D2S2,DSKIMGBKD,Mount FDD B;",
+	"H3S3,DSKIMGBKD,Mount FDD C;",
+	"H3S4,DSKIMGBKD,Mount FDD D;",
+	"H4S0,HDIHDSIMG,Mount HDD;",
 	"-;",
 	"O3,Monochrome,No,Yes;",
 	"ODE,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
@@ -397,11 +419,10 @@ localparam CONF_STR =
 	"H0O1,CPU Speed,4MHz,8MHz;",
 	"H1O1,CPU Speed,3MHz,6MHz;",
 	"-;",
-	"O6,FDD/HDD,Enable,Disable;",
-	"H0O9,SMK512,No,Yes;",
-	"H1O9,A16M,No,Yes;",
+	"OIK,Disk controller,Standard,A16M,SMK512,Samara,None;",
+	"OH,FDD write protect,No,Yes;",
 	"-;",
-	"R2,Reset & Unload Disks;",
+	"R2,Reset;",
 	// [MiSTer-DB9-Pro BEGIN] - Saturn-first joy_type (canonical bit notation)
 	"O[127:126],UserIO Joystick,Off,Saturn,DB9MD,DB15;",
 	"O[125],UserIO Players,1 Player,2 Players;",
@@ -411,7 +432,7 @@ localparam CONF_STR =
 	"V,v",`BUILD_DATE
 };
 
-hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(3)) hps_io
+hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(SLOTS)) hps_io
 (
 	.clk_sys(clk_sys),
 	.HPS_BUS(HPS_BUS),
@@ -431,17 +452,17 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(3)) hps_io
 	.forced_scandoubler(forced_scandoubler),
 
 	.status(status),
-	.status_menumask({status[6], ~status[5], status[5]}), 
+	.status_menumask({~(smk512 | samara), ~std_fdd, no_disk, ~status[5], status[5]}), 
 
 	.gamma_bus(gamma_bus),
 
-	.sd_lba('{sd_lba,sd_lba,sd_lba}),
+	.sd_lba('{hdd_lba,fdd_lba,fdd_lba,fdd_lba,fdd_lba}),
 	.sd_rd(sd_rd),
 	.sd_wr(sd_wr),
 	.sd_ack(sd_ack),
 	.sd_buff_addr(sd_buff_addr),
 	.sd_buff_dout(sd_buff_dout),
-	.sd_buff_din('{sd_buff_din,sd_buff_din,sd_buff_din}),
+	.sd_buff_din('{hdd_buff_din,fdd_buff_din,fdd_buff_din,fdd_buff_din,fdd_buff_din}),
 	.sd_buff_wr(sd_buff_wr),
 
 	.img_mounted(img_mounted),
@@ -546,10 +567,10 @@ wire        port_write   = bus_stb & port_sel   & bus_we;
 
 reg   [2:0] dout_delay;
 always @(posedge clk_sys) if(ce_bus_2) dout_delay <= {dout_delay[1:0], cpu_dout_out};
-always @(posedge clk_sys) if(ce_bus_2) cpu_ack <= keyboard_ack | scrreg_ack | ram_ack | disk_ack | ivec_ack;
+always @(posedge clk_sys) if(ce_bus_2) cpu_ack <= keyboard_ack | scrreg_ack | ram_ack | disk_ack | fdc_ack | ide_ack | ivec_ack;
 
 reg  [15:0] cpu_din;
-always @(posedge clk_sys) cpu_din <= cpureg_data | keyboard_data | scrreg_data | ram_data | sysreg_data | port_data | ivec_data;
+always @(posedge clk_sys) cpu_din <= cpureg_data | keyboard_data | scrreg_data | ram_data | sysreg_data | port_data | fdc_data | ide_data | ivec_data;
 
 reg  super_flg  = 1'b0;
 wire sysreg_acc = bus_stb & sysreg_sel;
@@ -580,7 +601,7 @@ memory memory
 
 	.init(!plock),
 	.sysreg_sel(sysreg_sel),
-	.extension(status[9]),
+	.extension(extension),
 
 	.bus_dout(ram_data),
 	.bus_ack(ram_ack),
@@ -608,7 +629,7 @@ always @(posedge clk_sys) begin
 	end else if(cpu_dclo) begin 
 		if(ce_12mp && reset_time) reset_time <= reset_time - 1;
 		bk0010     <= status[5];
-		disk_rom   <= ~status[6];
+		disk_rom   <= ~no_disk;
 		cold_start <= (old_bk0010 != bk0010) | (old_disk_rom != disk_rom) | !reset_time;
 		mode_start <= 1;
 	end
@@ -757,8 +778,12 @@ assign def_left_ch  = psg_active ? {1'b0, channel_a, 1'b0} + {2'b00, channel_b} 
 assign def_right_ch = psg_active ? {1'b0, channel_c, 1'b0} + {2'b00, channel_b} + {2'b00, spk_out, 5'b00000} : {spk_out, 7'b0000000};
 
 assign AUDIO_S = 0;
-assign AUDIO_L = {covox_enable ? {1'b0, out_port_data[7:0],  1'b0} + {2'b00, spk_out, 5'b00000} : def_left_ch,  6'd0};
-assign AUDIO_R = {covox_enable ? {1'b0, out_port_data[15:8], 1'b0} + {2'b00, spk_out, 5'b00000} : def_right_ch, 6'd0};
+// Covox x3: its full scale equals the PSG's (three channels at maximum), as in BKEmu
+wire [9:0] covox_l = {1'b0, out_port_data[7:0],  1'b0} + {2'b00, out_port_data[7:0]};
+wire [9:0] covox_r = {1'b0, out_port_data[15:8], 1'b0} + {2'b00, out_port_data[15:8]};
+
+assign AUDIO_L = {covox_enable ? covox_l + {2'b00, spk_out, 5'b00000} : def_left_ch,  6'd0};
+assign AUDIO_R = {covox_enable ? covox_r + {2'b00, spk_out, 5'b00000} : def_right_ch, 6'd0};
 assign AUDIO_MIX = status[11:10];
 
 
@@ -785,7 +810,7 @@ video video
 );
 
 
-//////////////////////////   DISK, TAPE   /////////////////////////////
+//////////////////////////   TAPE (BIN), EXT MODE   ///////////////////
 wire        disk_ack;
 wire        reset_req;
 wire        dsk_copy;
@@ -796,6 +821,148 @@ wire [15:0] dsk_copy_dout;
 wire        dsk_copy_we;
 wire        dsk_copy_rd;
 
-disk disk(.*, .img_size(img_size[40:9]), .reset(cpu_dclo), .reset_full(status[2]), .bus_ack(disk_ack), .sd_ack(|sd_ack));
+disk disk(.*, .reset(cpu_dclo), .bus_ack(disk_ack));
+
+
+//////////////////////////   FLOPPY DISKS   ///////////////////////////
+// The KNGMD: a KR1801VP1-128 at 177130/177132 and four drives.  A drive
+// has a disk when a non-empty image is mounted in it; one mounted
+// read-only is write protected, and the OSD can protect them all.
+reg [DRIVES-1:0] mount_dsk = 0;
+reg [DRIVES-1:0] img_ro    = 0;
+
+always @(posedge clk_sys)
+	for(int i = 0; i < DRIVES; i++)
+		if(img_mounted[FDD0 + i]) begin
+			mount_dsk[i] <= |img_size;
+			img_ro[i]    <= img_readonly;
+		end
+
+wire [DRIVES-1:0] fdd_wprot = img_ro | {DRIVES{status[17]}};
+
+wire [15:0] fdc_data;
+wire        fdc_ack;
+wire [15:0] fdd_data_in;      // controller -> drive
+wire [15:0] fdd_data_out;     // drive -> controller
+wire        fdd_write;
+wire  [1:0] fdd_drive;
+wire        fdd_motor;
+wire        fdd_step;
+wire        fdd_dir;
+wire        fdd_head;
+wire        fdd_valid;
+wire        fdd_sync;
+wire        fdd_crc_ok;
+wire        fdd_rdy;
+wire        fdd_tr0;
+wire        fdd_ind;
+
+// SMK512 / A16M: bit 2 of the mode register hides the controller from reads
+wire        fdc_rd_block = extension & ext_mode[2];
+
+vp1_128 fdc
+(
+	.clk_sys(clk_sys),
+	.reset(cpu_dclo),
+	.enable(disk_rom),
+	.rd_block(fdc_rd_block),
+
+	.bus_din(bus_din),
+	.bus_dout(fdc_data),
+	.bus_addr(bus_addr),
+	.bus_sync(bus_sync),
+	.bus_we(bus_we),
+	.bus_stb(bus_stb),
+	.bus_ack(fdc_ack),
+
+	.data_in(fdd_data_out),
+	.data_out(fdd_data_in),
+	.write(fdd_write),
+	.drive(fdd_drive),
+	.motor(fdd_motor),
+	.step(fdd_step),
+	.dir(fdd_dir),
+	.head(fdd_head),
+	.valid(fdd_valid),
+	.sync(fdd_sync),
+	.crc_ok(fdd_crc_ok),
+	.rdy(fdd_rdy),
+	.tr0(fdd_tr0),
+	.ind(fdd_ind),
+	.wprot_dsk(fdd_wprot)
+);
+
+fdd4 #(.CLK_HZ(96000000)) fdd
+(
+	.clk(clk_sys),
+	.rst(cpu_dclo),
+
+	.data_in(fdd_data_in),
+	.data_out(fdd_data_out),
+	.write(fdd_write),
+
+	.drive(fdd_drive),
+	.motor(fdd_motor),
+	.step(fdd_step),
+	.dir(fdd_dir),
+	.head(fdd_head),
+	.valid(fdd_valid),
+	.sync(fdd_sync),
+	.crc_ok(fdd_crc_ok),
+	.rdy(fdd_rdy),
+	.tr0(fdd_tr0),
+	.ind(fdd_ind),
+
+	.mount_dsk(mount_dsk),
+	.wprot_dsk(fdd_wprot),
+
+	.sd_lba(fdd_lba),
+	.sd_rd(sd_rd[FDD0 +: DRIVES]),
+	.sd_wr(sd_wr[FDD0 +: DRIVES]),
+	.sd_ack(sd_ack[FDD0 +: DRIVES]),
+	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_dout(sd_buff_dout),
+	.sd_buff_din(fdd_buff_din),
+	.sd_buff_wr(sd_buff_wr)
+);
+
+
+//////////////////////////   HARD DISK   //////////////////////////////
+// The SMK512's IDE controller at 177740-177757 or the Samara one at
+// 177620-177657.
+wire [15:0] ide_data;
+wire        ide_ack;
+wire        hdd_active;
+
+smk_ide hdd
+(
+	.clk_sys(clk_sys),
+	.reset(cpu_dclo),
+	.enable(disk_rom & (smk512 | samara)),
+	.samara(samara),
+
+	.bus_din(bus_din),
+	.bus_dout(ide_data),
+	.bus_addr(bus_addr),
+	.bus_sync(bus_sync),
+	.bus_we(bus_we),
+	.bus_wtbt(bus_wtbt),
+	.bus_stb(bus_stb),
+	.bus_ack(ide_ack),
+
+	.img_mounted(img_mounted[HDD]),
+	.img_readonly(img_readonly),
+	.img_size(img_size),
+	.sd_lba(hdd_lba),
+	.sd_rd(sd_rd[HDD]),
+	.sd_wr(sd_wr[HDD]),
+	.sd_ack(sd_ack[HDD]),
+	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_dout(sd_buff_dout),
+	.sd_buff_din(hdd_buff_din),
+	.sd_buff_wr(sd_buff_wr),
+
+	.active(hdd_active)
+);
 
 endmodule
